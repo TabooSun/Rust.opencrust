@@ -840,6 +840,10 @@ impl AgentRuntime {
     /// Build the base prompt: operating instructions + tool guidance.
     /// This is the layer that sits above DNA and below dynamic context.
     pub fn base_prompt_with_tools(&self) -> Option<String> {
+        self.base_prompt_with_allowed_tools(None)
+    }
+
+    fn base_prompt_with_allowed_tools(&self, allowed_tools: Option<&[String]>) -> Option<String> {
         let base = self
             .system_prompt
             .as_deref()
@@ -851,6 +855,10 @@ impl AgentRuntime {
         let hints: Vec<String> = self
             .tools
             .iter()
+            .filter(|t| match allowed_tools {
+                Some(allowed) => allowed.iter().any(|name| name == t.name()),
+                None => true,
+            })
             .map(|t| {
                 t.system_hint()
                     .map(|h| format!("  - {}: {}", t.name(), h))
@@ -970,15 +978,33 @@ impl AgentRuntime {
         self.tools.push(tool);
     }
 
-    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+    fn tool_definitions_for_allowlist(
+        &self,
+        allowed_tools: Option<&[String]>,
+    ) -> Vec<ToolDefinition> {
         self.tools
             .iter()
+            .filter(|t| match allowed_tools {
+                Some(allowed) => allowed.iter().any(|name| name == t.name()),
+                None => true,
+            })
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),
             })
             .collect()
+    }
+
+    fn prompt_and_tool_defs_for_session(
+        &self,
+        session_id: &str,
+    ) -> (Option<String>, Vec<ToolDefinition>) {
+        let allowed_tools = self.session_allowed_tools(session_id);
+        (
+            self.base_prompt_with_allowed_tools(allowed_tools.as_deref()),
+            self.tool_definitions_for_allowlist(allowed_tools.as_deref()),
+        )
     }
 
     fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
@@ -1767,7 +1793,7 @@ impl AgentRuntime {
         if let Some(block) = &skills {
             self.log_injected_skills(session_id, block);
         }
-        let base_prompt = self.base_prompt_with_tools();
+        let (base_prompt, tool_defs) = self.prompt_and_tool_defs_for_session(session_id);
         let rag_context = self.auto_rag_context(user_text).await;
         let user_display = self.session_user_name(session_id);
         let system = build_system_prompt(
@@ -1779,8 +1805,6 @@ impl AgentRuntime {
             None,
             user_display.as_deref(),
         );
-
-        let tool_defs = self.tool_definitions();
 
         let mut messages: Vec<ChatMessage> = conversation_history.to_vec();
         messages.push(ChatMessage {
@@ -1954,7 +1978,7 @@ impl AgentRuntime {
         if let Some(block) = &skills {
             self.log_injected_skills(session_id, block);
         }
-        let base_prompt = self.base_prompt_with_tools();
+        let (base_prompt, tool_defs) = self.prompt_and_tool_defs_for_session(session_id);
         let rag_context = self.auto_rag_context(user_text).await;
         let user_display = self.session_user_name(session_id);
         let system = build_system_prompt(
@@ -1966,8 +1990,6 @@ impl AgentRuntime {
             session_summary,
             user_display.as_deref(),
         );
-
-        let tool_defs = self.tool_definitions();
 
         let mut messages: Vec<ChatMessage> = conversation_history.to_vec();
         messages.push(ChatMessage {
@@ -2151,7 +2173,7 @@ impl AgentRuntime {
         if let Some(block) = &skills {
             self.log_injected_skills(session_id, block);
         }
-        let base_prompt = self.base_prompt_with_tools();
+        let (base_prompt, tool_defs) = self.prompt_and_tool_defs_for_session(session_id);
         let rag_context = self.auto_rag_context(memory_text).await;
         let user_display = self.session_user_name(session_id);
         let system = build_system_prompt(
@@ -2163,8 +2185,6 @@ impl AgentRuntime {
             None,
             user_display.as_deref(),
         );
-
-        let tool_defs = self.tool_definitions();
 
         let mut messages: Vec<ChatMessage> = conversation_history.to_vec();
         messages.push(ChatMessage {
@@ -2395,7 +2415,7 @@ impl AgentRuntime {
         if let Some(block) = &skills {
             self.log_injected_skills(session_id, block);
         }
-        let base_prompt = self.base_prompt_with_tools();
+        let (base_prompt, tool_defs) = self.prompt_and_tool_defs_for_session(session_id);
         let rag_context = self.auto_rag_context(memory_text).await;
         let user_display = self.session_user_name(session_id);
         let system = build_system_prompt(
@@ -2407,8 +2427,6 @@ impl AgentRuntime {
             None,
             user_display.as_deref(),
         );
-
-        let tool_defs = self.tool_definitions();
 
         let mut messages: Vec<ChatMessage> = conversation_history.to_vec();
         messages.push(ChatMessage {
@@ -2742,7 +2760,7 @@ impl AgentRuntime {
         if let Some(block) = &skills {
             self.log_injected_skills(session_id, block);
         }
-        let base_prompt = self.base_prompt_with_tools();
+        let (base_prompt, tool_defs) = self.prompt_and_tool_defs_for_session(session_id);
         let rag_context = self.auto_rag_context(memory_text).await;
         let user_display = self.session_user_name(session_id);
         let system = build_system_prompt(
@@ -2754,8 +2772,6 @@ impl AgentRuntime {
             session_summary,
             user_display.as_deref(),
         );
-
-        let tool_defs = self.tool_definitions();
 
         let mut messages: Vec<ChatMessage> = conversation_history.to_vec();
         messages.push(ChatMessage {
@@ -2947,7 +2963,7 @@ impl AgentRuntime {
         if let Some(block) = &skills {
             self.log_injected_skills(session_id, block);
         }
-        let base_prompt = self.base_prompt_with_tools();
+        let (base_prompt, tool_defs) = self.prompt_and_tool_defs_for_session(session_id);
         let rag_context = self.auto_rag_context(memory_text).await;
         let user_display = self.session_user_name(session_id);
         let system = build_system_prompt(
@@ -2959,8 +2975,6 @@ impl AgentRuntime {
             session_summary,
             user_display.as_deref(),
         );
-
-        let tool_defs = self.tool_definitions();
 
         let mut messages: Vec<ChatMessage> = conversation_history.to_vec();
         messages.push(ChatMessage {
@@ -4031,6 +4045,40 @@ fn parse_compression_response(
 mod tests {
     use super::*;
 
+    struct StaticTool {
+        name: &'static str,
+        description: &'static str,
+    }
+
+    impl StaticTool {
+        fn new(name: &'static str, description: &'static str) -> Self {
+            Self { name, description }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for StaticTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            self.description
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _context: &ToolContext,
+            _input: serde_json::Value,
+        ) -> Result<ToolOutput> {
+            Ok(ToolOutput::success("ok"))
+        }
+    }
+
     fn make_msg(role: ChatRole, text: &str) -> ChatMessage {
         ChatMessage {
             role,
@@ -4382,6 +4430,35 @@ mod tests {
         let mut runtime = AgentRuntime::new();
         runtime.set_summarization_enabled(false);
         assert!(!runtime.summarization_enabled);
+    }
+
+    #[test]
+    fn tool_definitions_for_allowlist_filters_advertised_tools() {
+        let mut runtime = AgentRuntime::new();
+        runtime.register_tool(Box::new(StaticTool::new("bash", "run shell command")));
+        runtime.register_tool(Box::new(StaticTool::new("file_read", "read files")));
+
+        let allowed = vec!["bash".to_string()];
+        let defs = runtime.tool_definitions_for_allowlist(Some(allowed.as_slice()));
+
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "bash");
+    }
+
+    #[test]
+    fn prompt_and_tool_defs_for_session_use_allowed_tools() {
+        let mut runtime = AgentRuntime::new();
+        runtime.register_tool(Box::new(StaticTool::new("bash", "run shell command")));
+        runtime.register_tool(Box::new(StaticTool::new("file_read", "read files")));
+        runtime.set_session_tool_config("sess", Some(vec!["bash".to_string()]), None);
+
+        let (prompt, defs) = runtime.prompt_and_tool_defs_for_session("sess");
+
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "bash");
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("  - bash:"));
+        assert!(!prompt.contains("  - file_read:"));
     }
 
     // --- Tool safety ---

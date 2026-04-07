@@ -5,7 +5,7 @@ use futures::StreamExt;
 use futures::stream::Stream;
 use opencrust_common::{Error, Result};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::providers::{
     ChatMessage, ChatRole, ContentBlock, LlmProvider, LlmRequest, LlmResponse, MessagePart,
@@ -14,6 +14,7 @@ use crate::providers::{
 
 const DEFAULT_MODEL: &str = "gpt-4o";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+const MAX_OPENAI_TOOLS: usize = 128;
 
 /// OpenAI Chat Completions provider.
 /// Also works with OpenAI-compatible APIs (Azure, local models) via `base_url`.
@@ -214,7 +215,7 @@ impl OpenAiProvider {
             }
         }
 
-        let tools: Vec<OpenAiTool> = request
+        let mut tools: Vec<OpenAiTool> = request
             .tools
             .iter()
             .map(|t| OpenAiTool {
@@ -226,6 +227,15 @@ impl OpenAiProvider {
                 },
             })
             .collect();
+
+        if tools.len() > MAX_OPENAI_TOOLS {
+            warn!(
+                requested_tools = tools.len(),
+                max_tools = MAX_OPENAI_TOOLS,
+                "openai tools exceed API limit; truncating advertised tools"
+            );
+            tools.truncate(MAX_OPENAI_TOOLS);
+        }
 
         let has_tools = !tools.is_empty();
         OpenAiRequest {
@@ -416,7 +426,10 @@ impl LlmProvider for OpenAiProvider {
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "max_completion_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
@@ -796,7 +809,7 @@ mod tests {
 
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "gpt-4o");
-        assert_eq!(json["max_tokens"], 1024);
+        assert_eq!(json["max_completion_tokens"], 1024);
         assert_eq!(json["messages"][0]["role"], "user");
         assert_eq!(json["messages"][0]["content"], "Hello");
         assert!(json.get("temperature").is_none());
@@ -996,6 +1009,32 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].function.name, "bash");
         assert_eq!(tools[0].r#type, "function");
+        assert_eq!(openai_req.tool_choice, Some("auto".to_string()));
+    }
+
+    #[test]
+    fn request_truncates_tools_to_openai_limit() {
+        let provider = OpenAiProvider::new("test-key", None, None);
+        let request = LlmRequest {
+            model: String::new(),
+            messages: vec![],
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            tools: (0..131)
+                .map(|i| ToolDefinition {
+                    name: format!("tool_{i}"),
+                    description: "Test tool".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                })
+                .collect(),
+        };
+
+        let openai_req = provider.build_request(&request);
+        let tools = openai_req.tools.unwrap();
+        assert_eq!(tools.len(), 128);
+        assert_eq!(tools[0].function.name, "tool_0");
+        assert_eq!(tools[127].function.name, "tool_127");
         assert_eq!(openai_req.tool_choice, Some("auto".to_string()));
     }
 

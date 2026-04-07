@@ -45,6 +45,7 @@ pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub system: Option<String>,
+    #[serde(rename = "max_completion_tokens")]
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
     pub tools: Vec<ToolDefinition>,
