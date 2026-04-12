@@ -6,7 +6,7 @@ use serenity::all::{
     Interaction as SerenityInteraction, Message as SerenityMessage, MessageId, Ready,
 };
 use tokio::sync::{broadcast, mpsc};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::traits::{ChannelEvent, ChannelResponse, ChannelStatus};
 
@@ -276,11 +276,11 @@ impl EventHandler for DiscordHandler {
         }
 
         let is_group = msg.guild_id.is_some();
+        let bot_id = ctx.cache.current_user().id;
+        let is_mentioned = is_group && msg.mentions.iter().any(|u| u.id == bot_id);
 
         // Apply group filter before processing
         if is_group {
-            let bot_id = ctx.cache.current_user().id;
-            let is_mentioned = msg.mentions.iter().any(|u| u.id == bot_id);
             if !(self.group_filter)(is_mentioned) {
                 return;
             }
@@ -328,6 +328,16 @@ impl EventHandler for DiscordHandler {
             None
         };
 
+        let text = if file.is_none()
+            && is_mentioned
+            && let Some(starter_text) =
+                fetch_thread_starter_text_for_first_bot_turn(&ctx, &msg, bot_id).await
+        {
+            build_thread_starter_prompt(&msg.content, Some(&starter_text), bot_id)
+        } else {
+            msg.content.clone()
+        };
+
         self.process_message(
             &ctx,
             msg.channel_id,
@@ -336,7 +346,7 @@ impl EventHandler for DiscordHandler {
                 .global_name
                 .clone()
                 .unwrap_or_else(|| msg.author.name.clone()),
-            msg.content.clone(),
+            text,
             is_group,
             file,
         )
@@ -416,6 +426,131 @@ async fn sync_discord_chunks(
     Ok(())
 }
 
+async fn fetch_thread_starter_text_for_first_bot_turn(
+    ctx: &Context,
+    msg: &SerenityMessage,
+    bot_id: serenity_model::UserId,
+) -> Option<String> {
+    if msg.guild_id.is_none() {
+        return None;
+    }
+
+    let thread = match msg.channel_id.to_channel(ctx).await {
+        Ok(serenity_model::Channel::Guild(channel)) => channel,
+        Ok(_) => return None,
+        Err(e) => {
+            debug!(
+                channel_id = %msg.channel_id,
+                "discord: failed to resolve channel before fetching thread starter: {e}"
+            );
+            return None;
+        }
+    };
+
+    if thread.thread_metadata.is_none() {
+        return None;
+    }
+
+    let Some(parent_id) = thread.parent_id else {
+        return None;
+    };
+
+    match msg
+        .channel_id
+        .messages(ctx, serenity_model::GetMessages::new().limit(25))
+        .await
+    {
+        Ok(messages) => {
+            if messages
+                .iter()
+                .any(|m| m.id != msg.id && m.author.id == bot_id)
+            {
+                return None;
+            }
+
+            if let Some(starter_text) = messages
+                .iter()
+                .find(|m| m.kind == serenity_model::MessageType::ThreadStarterMessage)
+                .and_then(discord_message_prompt_text)
+            {
+                return Some(starter_text);
+            }
+        }
+        Err(e) => {
+            warn!(
+                thread_id = %msg.channel_id,
+                "discord: failed to fetch thread history for starter message: {e}"
+            );
+        }
+    }
+
+    // For Discord threads created from a message, the thread channel id matches
+    // the source message id in the parent channel.
+    let source_message_id = serenity_model::MessageId::new(msg.channel_id.get());
+    match parent_id.message(ctx, source_message_id).await {
+        Ok(source_message) => discord_message_prompt_text(&source_message),
+        Err(e) => {
+            debug!(
+                thread_id = %msg.channel_id,
+                parent_channel_id = %parent_id,
+                source_message_id = %source_message_id,
+                "discord: failed to fetch parent thread starter message: {e}"
+            );
+            None
+        }
+    }
+}
+
+fn discord_message_prompt_text(message: &SerenityMessage) -> Option<String> {
+    let text = message.content.trim();
+    if !text.is_empty() {
+        return Some(text.to_string());
+    }
+
+    message
+        .referenced_message
+        .as_deref()
+        .and_then(discord_message_prompt_text)
+}
+
+fn build_thread_starter_prompt(
+    current_text: &str,
+    starter_text: Option<&str>,
+    bot_id: serenity_model::UserId,
+) -> String {
+    let Some(starter_text) = starter_text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return current_text.to_string();
+    };
+
+    let current_without_bot_mention = strip_leading_bot_mentions(current_text, bot_id);
+    if current_without_bot_mention.is_empty() {
+        starter_text.to_string()
+    } else {
+        format!(
+            "Thread starter message:\n{starter_text}\n\nCurrent message:\n{current_without_bot_mention}"
+        )
+    }
+}
+
+fn strip_leading_bot_mentions(text: &str, bot_id: serenity_model::UserId) -> &str {
+    let mut remaining = text.trim_start();
+    loop {
+        let Some(stripped) = strip_one_leading_bot_mention(remaining, bot_id) else {
+            break;
+        };
+        remaining = stripped.trim_start();
+    }
+    remaining.trim()
+}
+
+fn strip_one_leading_bot_mention(text: &str, bot_id: serenity_model::UserId) -> Option<&str> {
+    let user_mention = format!("<@{}>", bot_id.get());
+    let nickname_mention = format!("<@!{}>", bot_id.get());
+
+    text.strip_prefix(&user_mention)
+        .or_else(|| text.strip_prefix(&nickname_mention))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +589,57 @@ mod tests {
             Arc::new(|_| true),
         );
         handler.emit(ChannelEvent::StatusChanged(ChannelStatus::Connected));
+    }
+
+    #[test]
+    fn thread_starter_prompt_replaces_bot_mention_only() {
+        let bot_id = serenity_model::UserId::new(42);
+
+        let text = build_thread_starter_prompt("<@42>", Some("Check PRs"), bot_id);
+
+        assert_eq!(text, "Check PRs");
+    }
+
+    #[test]
+    fn thread_starter_prompt_replaces_nickname_bot_mention_only() {
+        let bot_id = serenity_model::UserId::new(42);
+
+        let text = build_thread_starter_prompt("<@!42>", Some("Check PRs"), bot_id);
+
+        assert_eq!(text, "Check PRs");
+    }
+
+    #[test]
+    fn thread_starter_prompt_includes_extra_current_text() {
+        let bot_id = serenity_model::UserId::new(42);
+
+        let text =
+            build_thread_starter_prompt("<@42> use owner/repo tradee", Some("Check PRs"), bot_id);
+
+        assert_eq!(
+            text,
+            "Thread starter message:\nCheck PRs\n\nCurrent message:\nuse owner/repo tradee"
+        );
+    }
+
+    #[test]
+    fn thread_starter_prompt_preserves_current_text_without_starter() {
+        let bot_id = serenity_model::UserId::new(42);
+
+        let text = build_thread_starter_prompt("<@42>", None, bot_id);
+
+        assert_eq!(text, "<@42>");
+    }
+
+    #[test]
+    fn thread_starter_prompt_does_not_strip_non_bot_mentions() {
+        let bot_id = serenity_model::UserId::new(42);
+
+        let text = build_thread_starter_prompt("<@7>", Some("Check PRs"), bot_id);
+
+        assert_eq!(
+            text,
+            "Thread starter message:\nCheck PRs\n\nCurrent message:\n<@7>"
+        );
     }
 }
