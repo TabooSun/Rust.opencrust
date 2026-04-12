@@ -23,7 +23,7 @@ use crate::providers::{
 use crate::tools::{Tool, ToolContext, ToolOutput};
 
 /// Maximum number of tool-use round-trips before the loop is forcibly stopped.
-const MAX_TOOL_ITERATIONS: usize = 10;
+const MAX_TOOL_ITERATIONS: usize = 50;
 /// Minimum number of tool calls in a turn before the agent is nudged to consider create_skill.
 const SKILL_REFLECTION_THRESHOLD: usize = 3;
 /// Default max skills injected per turn when semantic retrieval is active.
