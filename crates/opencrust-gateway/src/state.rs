@@ -440,10 +440,32 @@ impl AppState {
 
         let channel = channel_id.unwrap_or("web");
         let user = user_id.unwrap_or("anonymous");
-        let metadata = self
+
+        // Compute any new fields to write (e.g. continuity_key).
+        let new_fields = self
             .continuity_key(user_id)
             .map(|k| serde_json::json!({ "continuity_key": k }))
             .unwrap_or_else(|| serde_json::json!({}));
+
+        // Load existing session metadata and merge new_fields into it so that
+        // channel routing keys written by `persist_turn` (e.g. `discord_channel_id`,
+        // `telegram_chat_id`) are not overwritten on every hydration call —
+        // which would cause scheduled recurring tasks to lose routing info after
+        // the first execution.
+        let metadata = {
+            let mut base = store
+                .load_session_metadata(session_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let (Some(base_obj), Some(new_obj)) = (base.as_object_mut(), new_fields.as_object())
+            {
+                for (k, v) in new_obj {
+                    base_obj.insert(k.clone(), v.clone());
+                }
+            }
+            base
+        };
 
         let mut loaded_history = Vec::new();
         {
